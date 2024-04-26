@@ -140,6 +140,7 @@ u_loader = torch.utils.data.DataLoader(u_dataset,
                                        pin_memory=True)
 
 
+# gradient 를 계산 안하고 mse 계산
 def consistency_loss(pre, gt):
     _loss = 0
     for _pre, _gt in zip(pre, gt):
@@ -150,8 +151,11 @@ def consistency_loss(pre, gt):
 
 
 def update_ema_variables(teacher, student, alpha, global_step):
+    # alpha 감쇠율, 값이 클 수록 좀 더 많은 영향을 미침
+    # 학습 초기에는 빠른 속도로 변화하다가 점점 더 느리게 변화
     alpha = min(1 - 1 / (global_step + 1), alpha)
     for ema_param, param in zip(teacher.parameters(), student.parameters()):
+        # tacher 모델에 alpha 를 곱하고 student 모델에 (1 - alpha) 를 곱한 후 더함
         ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
 
 
@@ -169,22 +173,19 @@ def get_current_consistency_weight(epoch,
     return consistency * sigmoid_rampup(epoch, consistency_rampup)
 
 
-def update_ema_variables(teacher, student, alpha, global_step):
-    alpha = min(1 - 1 / (global_step + 1), alpha)
-    for ema_param, param in zip(teacher.parameters(), student.parameters()):
-        ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
-
-
 tic = 0
 for k in range(parse_config.n_epochs):
     student_model.train()
     teacher_model.train()
     tic = time.perf_counter()
+    
+    # u_data -> unlabeled data
     for batch_idx, (batch_data,
                     u_data) in enumerate(zip(train_loader, u_loader)):
         images = batch_data[0].cuda().float().unsqueeze(1)
         labels = batch_data[1].cuda().float().unsqueeze(1)
         u_images = u_data.cuda().float().unsqueeze(1)
+        # clamp 는 최소값과 최대값을 설정해주는 함수, 아래는 -0.2 ~ 0.2 사이의 값으로 설정
         noise = torch.clamp(torch.randn_like(u_images) * 0.1, -0.2, 0.2)
         pre = student_model(images)
 
@@ -199,17 +200,18 @@ for k in range(parse_config.n_epochs):
             sup_loss += criteon(_pre, _label)
 
         # consistency loss
-
-        teacher_o = teacher_model(u_images + noise)
+        teacher_o = teacher_model(u_images + noise) # 잡음을 추가해줌으로써, 더욱 robust 하게 만들어줌
         student_o = student_model(u_images)
-        consis_loss = consistency_loss(student_o, teacher_o)
+        consis_loss = consistency_loss(student_o, teacher_o) # mse loss (pred, gt)
 
         loss = consis_loss * get_current_consistency_weight(k) + sup_loss
-        optimizer.zero_grad()
+        optimizer.zero_grad() # student model 의 gradient 를 초기화
         loss.backward()
         optimizer.step()
 
+        # k -> epoch 
         step = k * len(train_loader) + batch_idx
+        # student 모델이 teacher 모델로부터 정보를 얻어가도록 함
         update_ema_variables(teacher_model, student_model, 0.999, step)
 
         if batch_idx % 10 == 0:
